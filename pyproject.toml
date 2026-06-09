@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cell-genesis-studio"
+version = "0.1.0"
+description = "Local 3D manual initial cell state editor and review tools for CellUniverse outputs."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "numpy",
+  "tifffile",
+  "napari",
+  "qtpy",
+  "imageio",
+  "opencv-python",
+  "PyQt5",
+]
+
+[project.scripts]
+cell-genesis-studio = "celluniverse_napari_app.local_app:main"
+celluniverse-review = "celluniverse_napari_app.cli:main"
+celluniverse-local-app = "celluniverse_napari_app.local_app:main"
+
+[project.entry-points."napari.manifest"]
+celluniverse-napari-app = "celluniverse_napari_app:napari.yaml"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+celluniverse_napari_app = ["napari.yaml"]

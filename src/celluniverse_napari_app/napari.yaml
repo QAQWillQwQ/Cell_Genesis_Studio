@@ -1,0 +1,10 @@
+name: celluniverse-napari-app
+display_name: CellUniverse Napari App
+contributions:
+  commands:
+    - id: celluniverse-napari-app.review_widget
+      title: Open CellUniverse review widget
+      python_name: celluniverse_napari_app.plugin:ReviewWidget
+  widgets:
+    - command: celluniverse-napari-app.review_widget
+      display_name: CellUniverse Review
