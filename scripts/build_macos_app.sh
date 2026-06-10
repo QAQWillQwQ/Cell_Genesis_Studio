@@ -103,29 +103,107 @@ cat > "${PLIST}" <<EOF
 </plist>
 EOF
 
+create_icns_from_png() {
+  local source_png="$1"
+  local output_icns="$2"
+
+  python3 - "${source_png}" "${output_icns}" <<'PY'
+from pathlib import Path
+import io
+import struct
+import sys
+
+from PIL import Image
+
+source = Path(sys.argv[1])
+output = Path(sys.argv[2])
+
+image = Image.open(source).convert("RGBA")
+side = max(image.size)
+canvas = Image.new("RGBA", (side, side), (0, 0, 0, 0))
+canvas.paste(image, ((side - image.width) // 2, (side - image.height) // 2), image)
+
+sizes = [
+    ("icp4", 16),
+    ("icp5", 32),
+    ("icp6", 64),
+    ("ic07", 128),
+    ("ic08", 256),
+    ("ic09", 512),
+    ("ic10", 1024),
+]
+
+resampling = getattr(Image, "Resampling", Image).LANCZOS
+chunks = []
+for code, pixels in sizes:
+    buffer = io.BytesIO()
+    canvas.resize((pixels, pixels), resampling).save(buffer, format="PNG")
+    data = buffer.getvalue()
+    chunks.append(code.encode("ascii") + struct.pack(">I", len(data) + 8) + data)
+
+body = b"".join(chunks)
+output.write_bytes(b"icns" + struct.pack(">I", len(body) + 8) + body)
+PY
+}
+
+create_iconset_from_png() {
+  local source_png="$1"
+  local iconset_dir="$2"
+
+  python3 - "${source_png}" "${iconset_dir}" <<'PY'
+from pathlib import Path
+import sys
+
+from PIL import Image
+
+source = Path(sys.argv[1])
+iconset = Path(sys.argv[2])
+iconset.mkdir(parents=True, exist_ok=True)
+
+image = Image.open(source).convert("RGBA")
+side = max(image.size)
+canvas = Image.new("RGBA", (side, side), (0, 0, 0, 0))
+canvas.paste(image, ((side - image.width) // 2, (side - image.height) // 2), image)
+
+sizes = [
+    ("icon_16x16.png", 16),
+    ("icon_16x16@2x.png", 32),
+    ("icon_32x32.png", 32),
+    ("icon_32x32@2x.png", 64),
+    ("icon_128x128.png", 128),
+    ("icon_128x128@2x.png", 256),
+    ("icon_256x256.png", 256),
+    ("icon_256x256@2x.png", 512),
+    ("icon_512x512.png", 512),
+    ("icon_512x512@2x.png", 1024),
+]
+
+resampling = getattr(Image, "Resampling", Image).LANCZOS
+for filename, pixels in sizes:
+    canvas.resize((pixels, pixels), resampling).save(iconset / filename)
+PY
+}
+
 for icon in \
+  "${APP_DIR}/resources/CellGenesisStudio.png" \
   "${PROJECT_ROOT}/CellUniverse_Electron/resources/cell_universe_icon.png" \
   "${PROJECT_ROOT}/CellUniverse_MacLiquidGlass/Cell Universe.png"
 do
-  if [ -f "${icon}" ] && command -v sips >/dev/null 2>&1 && command -v iconutil >/dev/null 2>&1; then
-    ICONSET="${RESOURCES_DIR}/CellGenesisStudio.iconset"
-    mkdir -p "${ICONSET}"
-    sips -z 16 16 "${icon}" --out "${ICONSET}/icon_16x16.png" >/dev/null
-    sips -z 32 32 "${icon}" --out "${ICONSET}/icon_16x16@2x.png" >/dev/null
-    sips -z 32 32 "${icon}" --out "${ICONSET}/icon_32x32.png" >/dev/null
-    sips -z 64 64 "${icon}" --out "${ICONSET}/icon_32x32@2x.png" >/dev/null
-    sips -z 128 128 "${icon}" --out "${ICONSET}/icon_128x128.png" >/dev/null
-    sips -z 256 256 "${icon}" --out "${ICONSET}/icon_128x128@2x.png" >/dev/null
-    sips -z 256 256 "${icon}" --out "${ICONSET}/icon_256x256.png" >/dev/null
-    sips -z 512 512 "${icon}" --out "${ICONSET}/icon_256x256@2x.png" >/dev/null
-    sips -z 512 512 "${icon}" --out "${ICONSET}/icon_512x512.png" >/dev/null
-    sips -z 1024 1024 "${icon}" --out "${ICONSET}/icon_512x512@2x.png" >/dev/null
-    if iconutil -c icns "${ICONSET}" -o "${RESOURCES_DIR}/CellGenesisStudio.icns" >/dev/null 2>&1; then
+  if [ -f "${icon}" ] && command -v python3 >/dev/null 2>&1; then
+    if create_icns_from_png "${icon}" "${RESOURCES_DIR}/CellGenesisStudio.icns" >/dev/null 2>&1; then
       /usr/libexec/PlistBuddy -c "Add :CFBundleIconFile string CellGenesisStudio" "${PLIST}" >/dev/null
-      rm -rf "${ICONSET}"
       break
+    elif command -v iconutil >/dev/null 2>&1; then
+      ICONSET="${RESOURCES_DIR}/CellGenesisStudio.iconset"
+      mkdir -p "${ICONSET}"
+      if create_iconset_from_png "${icon}" "${ICONSET}" >/dev/null 2>&1 && \
+         iconutil -c icns "${ICONSET}" -o "${RESOURCES_DIR}/CellGenesisStudio.icns" >/dev/null 2>&1; then
+        /usr/libexec/PlistBuddy -c "Add :CFBundleIconFile string CellGenesisStudio" "${PLIST}" >/dev/null
+        rm -rf "${ICONSET}"
+        break
+      fi
+      rm -rf "${ICONSET}"
     fi
-    rm -rf "${ICONSET}"
   fi
 done
 

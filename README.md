@@ -53,14 +53,19 @@ tail -f /tmp/cell_genesis_studio.log
 Manual initial cell setup now uses an embedded 3D editing workflow:
 
 - The embedded napari 3D editor is the primary workspace. Opening a TIFF stack loads the volume into the right-side 3D panel with `viridis` as the default colormap.
+- The app opens in a polished dark appearance by default. The top `Appearance` selector can switch the PyQt shell between dark and light mode without changing the loaded data.
 - A TIFF stack can be opened either from the file picker or by dragging a local `.tif` / `.tiff` file directly onto the app window, including the embedded 3D viewer area.
 - The cell kind selector starts at `Non Selected`. Choosing a cell kind creates the current editable 3D ellipsoid candidate.
 - Voxel size is read from ImageJ or OME TIFF metadata when available. The voxel controls remain as an override for TIFF files that do not contain reliable physical size metadata.
 - The PyQt window only keeps the dataset, category, numeric fine tuning, and save controls. The older XY/XZ/YZ projection panes are intentionally not shown in the main workflow.
-- The `Open 3D Napari Adjuster` button focuses the embedded 3D viewer and synchronizes the current manual cells, red selected center, transparent ellipsoid rings, XYZ axes, and draggable axis handles. Dragging the red center updates the cell center; dragging the green X, cyan Y, or orange Z handles updates each radius.
-- The ellipsoid rings have an opacity control. The XYZ axes stay bright and opaque so they remain visible over the volume.
+- The `Open 3D Napari Adjuster` button focuses the embedded 3D viewer and synchronizes the current manual cells, red center points, transparent ellipsoid rings, and draggable boundary handles. Clicking a red center point selects that cell; dragging the selected red center updates the cell center, and dragging the green X, cyan Y, or orange Z handles updates each radius.
+- `Auto Detect Cells (Cell Lumen & PCA)` runs the C++ `celluniverse --cell-lumen` entry point on the currently opened TIFF frame, streams progress into the app, imports detected centers and ellipsoid radii as editable cells, and skips preview TIFF writing so the first editable result appears faster.
+- `Clean Auto Detect` removes only the cells created by the auto detection pass, leaving manually created cells in place.
+- The bundled default config points to the concentrated single file density switch candidate YAML. It is useful for testing the integrated flow, but the YAML itself is marked as a candidate that still needs a fresh verification run before it should be treated as final.
+- Current auto import uses the Cell Lumen center plus `majorRadius`, `bRadius`, and `minorRadius`. Full rotated PCA ellipsoid import still needs the algorithm side to output orientation angles, or the app needs a later rotation editor.
+- The ellipsoid rings default to full opacity and can be adjusted with a slider or hidden with one button. Dense auto detection frames use low detail cached background rings, while the selected cell keeps a separate editable ring and boundary handles so list selection and dragging do not redraw every detected cell.
 - `W/A/S/D` moves in XY, `Q/E` moves in Z, `Shift` makes the movement step larger, `+/-` changes the selected cell size, and `Enter` finishes the selected cell.
-- `Initial_frame.csv` now stores the center and three ellipsoid radii so the C++ algorithm can use the manual shape directly. `Initial_frame_manual_shapes.csv` keeps extra editing metadata for review and reload.
+- `Initial_frame.csv` stores the center and three ellipsoid radii in the format expected by the C++ algorithm. The Z radius is saved in the scaled optimizer space. `Initial_frame_manual_shapes.csv` keeps the raw napari display radii plus extra editing metadata for review and reload.
 - A newly divided daughter pair is saved as two matched cells and also exports `Initial_frame_daughter_pairs.csv` with the pair id and center distance.
 
 ```bash

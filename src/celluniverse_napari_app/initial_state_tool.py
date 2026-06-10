@@ -84,6 +84,19 @@ CATEGORY_COLORS_BGR = {
 }
 
 
+AUTO_DETECT_NOTE = "auto detected by Cell Lumen and PCA"
+CPP_CELLUNIVERSE_BINARY = Path("/Users/wangyiding/CellUniverse/C++/build/celluniverse")
+DEFAULT_CELL_LUMEN_CONFIG = Path(
+    "/Users/wangyiding/CellUniverse/C++/config/C.elegans developing embryo/Concentrated/"
+    "CONCENTRATED_SINGLE_FILE_DENSITY_SWITCH_CANDIDATE_NOT_RUN_VERIFIED_20260609.yaml"
+)
+DEFAULT_ELLIPSOID_OPACITY = 1.0
+BACKGROUND_RING_SEGMENTS = 24
+BACKGROUND_RINGS_PER_AXIS = 1
+SELECTED_RING_SEGMENTS = 48
+SELECTED_RINGS_PER_AXIS = 3
+
+
 @dataclass
 class ManualCell:
     name: str
@@ -351,20 +364,44 @@ class InitialStateBuilder(QtWidgets.QWidget):
         self._drop_event_filter_installed = False
         self._interaction_mode = "view"
         self._napari_auto_mouse_bound = False
+        self._background_rings_dirty = True
+        self._center_layer_cell_indices: list[int] = []
+        self._busy_dialog: QtWidgets.QProgressDialog | None = None
+        self.auto_process: QtCore.QProcess | None = None
+        self._auto_detect_csv: Path | None = None
         self._build_ui()
         self._napari_sync_timer = QtCore.QTimer(self)
         self._napari_sync_timer.setSingleShot(True)
         self._napari_sync_timer.timeout.connect(self.sync_napari)
+        self._background_ring_refresh_timer = QtCore.QTimer(self)
+        self._background_ring_refresh_timer.setSingleShot(True)
+        self._background_ring_refresh_timer.timeout.connect(self._refresh_background_ring_layer)
         self.setFocusPolicy(QtCore.Qt.StrongFocus)
         self.setAcceptDrops(True)
         self._install_drop_event_filter()
 
     def _build_ui(self) -> None:
         main = QtWidgets.QHBoxLayout(self)
+        main.setContentsMargins(0, 0, 0, 0)
 
+        controls_container = QtWidgets.QWidget()
+        controls_container.setObjectName("ControlPanel")
+        controls_container.setMinimumWidth(440)
         controls = QtWidgets.QVBoxLayout()
+        controls_container.setLayout(controls)
+        controls.setContentsMargins(16, 14, 16, 14)
         controls.setSpacing(8)
-        main.addLayout(controls, 0)
+
+        controls_scroll = QtWidgets.QScrollArea()
+        controls_scroll.setObjectName("ControlsScroll")
+        controls_scroll.setWidgetResizable(True)
+        controls_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        controls_scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
+        controls_scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        controls_scroll.setMinimumWidth(460)
+        controls_scroll.setMaximumWidth(540)
+        controls_scroll.setWidget(controls_container)
+        main.addWidget(controls_scroll, 0)
 
         workflow = QtWidgets.QLabel(
             "Workflow: 1. Open one frame real TIFF stack.  "
@@ -372,7 +409,7 @@ class InitialStateBuilder(QtWidgets.QWidget):
             "3. Finish each cell.  4. Save Initial_frame.csv."
         )
         workflow.setWordWrap(True)
-        workflow.setStyleSheet("color: #555; font-weight: 600;")
+        workflow.setObjectName("WorkflowLabel")
         controls.addWidget(workflow)
 
         load_group = QtWidgets.QGroupBox("Step 1: Frame input")
@@ -396,6 +433,8 @@ class InitialStateBuilder(QtWidgets.QWidget):
 
         voxel_group = QtWidgets.QGroupBox("Step 2: Voxel size override")
         voxel_form = QtWidgets.QFormLayout(voxel_group)
+        voxel_form.setVerticalSpacing(10)
+        voxel_form.setFieldGrowthPolicy(QtWidgets.QFormLayout.AllNonFixedFieldsGrow)
         self.voxel_x = self._double_spin(0.01, 100.0, 1.0, 0.1)
         self.voxel_y = self._double_spin(0.01, 100.0, 1.0, 0.1)
         self.voxel_z = self._double_spin(0.01, 100.0, 7.0, 0.1)
@@ -403,20 +442,70 @@ class InitialStateBuilder(QtWidgets.QWidget):
         self.colormap_combo.addItems(COLORMAP_OPTIONS)
         self.colormap_combo.setCurrentText("viridis")
         self.colormap_combo.currentTextChanged.connect(self.apply_colormap_to_volume)
-        self.ellipsoid_opacity = self._double_spin(0.05, 1.0, 0.48, 0.05)
-        self.ellipsoid_opacity.valueChanged.connect(self.update_napari_edit_layers)
+        self.ellipsoid_opacity = self._double_spin(0.0, 1.0, DEFAULT_ELLIPSOID_OPACITY, 0.02)
+        self.ellipsoid_opacity.valueChanged.connect(self.set_ellipsoid_opacity_from_spin)
+        self.ellipsoid_opacity_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.ellipsoid_opacity_slider.setRange(0, 100)
+        self.ellipsoid_opacity_slider.setValue(int(round(DEFAULT_ELLIPSOID_OPACITY * 100)))
+        self.ellipsoid_opacity_slider.valueChanged.connect(self.set_ellipsoid_opacity_from_slider)
+        opacity_widget = QtWidgets.QWidget()
+        opacity_widget.setObjectName("FullWidthControl")
+        opacity_layout = QtWidgets.QVBoxLayout(opacity_widget)
+        opacity_layout.setContentsMargins(0, 0, 0, 0)
+        opacity_layout.setSpacing(8)
+        opacity_value_row = QtWidgets.QHBoxLayout()
+        opacity_value_row.setContentsMargins(0, 0, 0, 0)
+        opacity_value_row.setSpacing(10)
+        opacity_title = QtWidgets.QLabel("shell opacity")
+        opacity_title.setObjectName("MutedLabel")
+        self.ellipsoid_opacity.setMinimumWidth(96)
+        self.ellipsoid_opacity.setMaximumWidth(120)
+        opacity_value_row.addWidget(opacity_title)
+        opacity_value_row.addStretch(1)
+        opacity_value_row.addWidget(self.ellipsoid_opacity)
+        opacity_layout.addLayout(opacity_value_row)
+        opacity_layout.addWidget(self.ellipsoid_opacity_slider)
+        self.ellipsoid_visibility_button = QtWidgets.QPushButton("Hide Ellipsoid Shells")
+        self.ellipsoid_visibility_button.setCheckable(True)
+        self.ellipsoid_visibility_button.setChecked(True)
+        self.ellipsoid_visibility_button.clicked.connect(self.toggle_ellipsoid_shells)
         self.voxel_status = QtWidgets.QLabel("TIFF metadata not loaded yet.")
         self.voxel_status.setWordWrap(True)
-        self.voxel_status.setStyleSheet("color: #c8c8c8;")
+        self.voxel_status.setObjectName("MutedLabel")
         for spin in (self.voxel_x, self.voxel_y, self.voxel_z):
             spin.valueChanged.connect(self.refresh_views)
         voxel_form.addRow("x voxel", self.voxel_x)
         voxel_form.addRow("y voxel", self.voxel_y)
         voxel_form.addRow("z voxel", self.voxel_z)
         voxel_form.addRow("colormap", self.colormap_combo)
-        voxel_form.addRow("ellipsoid opacity", self.ellipsoid_opacity)
+        voxel_form.addRow(opacity_widget)
+        voxel_form.addRow("shell display", self.ellipsoid_visibility_button)
         voxel_form.addRow("metadata", self.voxel_status)
         controls.addWidget(voxel_group)
+
+        auto_group = QtWidgets.QGroupBox("Auto detection")
+        auto_layout = QtWidgets.QVBoxLayout(auto_group)
+        auto_config_row = QtWidgets.QHBoxLayout()
+        self.auto_config_path = QtWidgets.QLineEdit(str(DEFAULT_CELL_LUMEN_CONFIG))
+        choose_auto_config = QtWidgets.QPushButton("Choose config")
+        choose_auto_config.clicked.connect(self.choose_auto_config)
+        auto_config_row.addWidget(self.auto_config_path, 1)
+        auto_config_row.addWidget(choose_auto_config)
+        self.auto_detect_button = QtWidgets.QPushButton("Auto Detect Cells (Cell Lumen & PCA)")
+        self.auto_detect_button.clicked.connect(self.run_auto_detect_cells)
+        self.clean_auto_button = QtWidgets.QPushButton("Clean Auto Detect")
+        self.clean_auto_button.clicked.connect(self.clean_auto_detected_cells)
+        auto_button_row = QtWidgets.QHBoxLayout()
+        auto_button_row.addWidget(self.auto_detect_button)
+        auto_button_row.addWidget(self.clean_auto_button)
+        self.auto_log = QtWidgets.QPlainTextEdit()
+        self.auto_log.setReadOnly(True)
+        self.auto_log.setMaximumHeight(120)
+        self.auto_log.setPlaceholderText("Cell Lumen progress will appear here while auto detection is running.")
+        auto_layout.addLayout(auto_config_row)
+        auto_layout.addLayout(auto_button_row)
+        auto_layout.addWidget(self.auto_log)
+        controls.addWidget(auto_group)
 
         add_group = QtWidgets.QGroupBox("Step 3: Manual cell")
         add_form = QtWidgets.QFormLayout(add_group)
@@ -496,7 +585,7 @@ class InitialStateBuilder(QtWidgets.QWidget):
 
         hint = QtWidgets.QLabel("3D controls: use View / Rotate for the napari camera. Use Edit Ellipsoid to drag the red center or the green X, cyan Y, and orange Z handles. Keyboard fine adjustment only works in Edit Ellipsoid mode.")
         hint.setWordWrap(True)
-        hint.setStyleSheet("color: #777")
+        hint.setObjectName("MutedLabel")
         controls.addWidget(hint)
 
         workspace = QtWidgets.QGroupBox("3D Manual Cell Workspace")
@@ -508,14 +597,11 @@ class InitialStateBuilder(QtWidgets.QWidget):
         )
         self.workspace_status.setWordWrap(True)
         self.workspace_status.setAlignment(QtCore.Qt.AlignCenter)
-        self.workspace_status.setStyleSheet(
-            "QLabel { background: #101214; border: 1px solid #32363a; color: #d7dde5; "
-            "font-size: 18px; font-weight: 600; padding: 36px; }"
-        )
+        self.workspace_status.setObjectName("WorkspaceStatus")
         self.viewer_host = QtWidgets.QFrame()
+        self.viewer_host.setObjectName("ViewerHost")
         self.viewer_host.setAcceptDrops(True)
         self.viewer_host.setFrameShape(QtWidgets.QFrame.NoFrame)
-        self.viewer_host.setStyleSheet("QFrame { background: #080b0f; border: 1px solid #252a30; }")
         self.viewer_host_layout = QtWidgets.QVBoxLayout(self.viewer_host)
         self.viewer_host_layout.setContentsMargins(0, 0, 0, 0)
         self.viewer_host_layout.addWidget(self.workspace_status, 1)
@@ -532,7 +618,7 @@ class InitialStateBuilder(QtWidgets.QWidget):
         box = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(box)
         label = QtWidgets.QLabel(title)
-        label.setStyleSheet("font-weight: 600;")
+        label.setObjectName("MutedLabel")
         layout.addWidget(label)
         layout.addWidget(canvas, 1)
         return box
@@ -674,6 +760,7 @@ class InitialStateBuilder(QtWidgets.QWidget):
             self.frame_spin.setValue(int(match[-1]))
         self._cached_base.clear()
         self.cells.clear()
+        self._mark_background_rings_dirty()
         self.selected_index = -1
         self.cell_list.clear()
         self.category_combo.setCurrentIndex(0)
@@ -722,6 +809,249 @@ class InitialStateBuilder(QtWidgets.QWidget):
         if not path:
             return
         self.load_initial_csv(Path(path))
+
+    def choose_auto_config(self) -> None:
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "Choose Cell Lumen config",
+            str(DEFAULT_CELL_LUMEN_CONFIG.parent),
+            "YAML files (*.yaml *.yml);;All files (*)",
+        )
+        if path:
+            self.auto_config_path.setText(path)
+
+    def run_auto_detect_cells(self) -> None:
+        if self.volume is None or self.volume_path is None:
+            QtWidgets.QMessageBox.warning(self, "No frame", "Open one TIFF frame before running auto detection.")
+            return
+        if self.auto_process is not None and self.auto_process.state() != QtCore.QProcess.NotRunning:
+            QtWidgets.QMessageBox.information(self, "Auto detection running", "Cell Lumen is already running.")
+            return
+
+        binary = CPP_CELLUNIVERSE_BINARY
+        if not binary.exists():
+            QtWidgets.QMessageBox.critical(
+                self,
+                "Cell Lumen binary missing",
+                f"Cannot find the C++ CellUniverse binary:\n{binary}\n\nBuild the C++ project first.",
+            )
+            return
+
+        config_path = Path(self.auto_config_path.text()).expanduser()
+        if not config_path.exists():
+            QtWidgets.QMessageBox.critical(self, "Config missing", f"Cannot find the Cell Lumen config:\n{config_path}")
+            return
+
+        output_dir = self._auto_output_dir()
+        output_dir.mkdir(parents=True, exist_ok=True)
+        frame = self.frame_spin.value()
+        stem = re.sub(r"[^A-Za-z0-9_]+", "_", self.volume_path.stem).strip("_") or "frame"
+        csv_output = output_dir / f"CellLumen_auto_detect_{stem}_{frame:03d}.csv"
+        self._auto_detect_csv = csv_output
+
+        self.auto_log.clear()
+        self._append_auto_log("Starting Cell Lumen auto detection.")
+        self._append_auto_log(f"Input TIFF: {self.volume_path}")
+        self._append_auto_log(f"Config: {config_path}")
+        self._append_auto_log(f"Output CSV: {csv_output}")
+        self._append_auto_log("TIFF preview writing is skipped for this App pass so the UI gets the CSV faster.")
+
+        process = QtCore.QProcess(self)
+        process.setProgram(str(binary))
+        process.setArguments(["--cell-lumen", str(self.volume_path), str(output_dir), str(config_path), str(csv_output)])
+        process.setWorkingDirectory(str(CPP_CELLUNIVERSE_BINARY.parent.parent))
+        process.setProcessChannelMode(QtCore.QProcess.MergedChannels)
+        env = QtCore.QProcessEnvironment.systemEnvironment()
+        env.insert("CELLUNIVERSE_CELL_LUMEN_SKIP_TIFF", "1")
+        process.setProcessEnvironment(env)
+        process.readyReadStandardOutput.connect(self._read_auto_detect_output)
+        process.finished.connect(self._auto_process_finished)
+        self.auto_process = process
+        self._set_auto_detect_running(True)
+        process.start()
+        if not process.waitForStarted(3000):
+            self._set_auto_detect_running(False)
+            self.auto_process = None
+            QtWidgets.QMessageBox.critical(self, "Auto detection failed", "Cell Lumen process could not start.")
+
+    def _auto_output_dir(self) -> Path:
+        return Path(self.output_dir.text()).expanduser() / "auto_detect"
+
+    def _append_auto_log(self, text: str) -> None:
+        if not hasattr(self, "auto_log"):
+            return
+        cleaned = text.rstrip()
+        if not cleaned:
+            return
+        self.auto_log.moveCursor(QtGui.QTextCursor.End)
+        self.auto_log.insertPlainText(cleaned + "\n")
+        self.auto_log.moveCursor(QtGui.QTextCursor.End)
+
+    def _show_busy_dialog(self, title: str, message: str) -> None:
+        self._hide_busy_dialog()
+        dialog = QtWidgets.QProgressDialog(message, "", 0, 0, self)
+        dialog.setWindowTitle(title)
+        dialog.setCancelButton(None)
+        dialog.setWindowModality(QtCore.Qt.ApplicationModal)
+        dialog.setMinimumDuration(0)
+        dialog.setAutoClose(False)
+        dialog.setAutoReset(False)
+        self._busy_dialog = dialog
+        self._append_auto_log(message)
+        dialog.show()
+        QtWidgets.QApplication.processEvents()
+
+    def _update_busy_dialog(self, message: str) -> None:
+        self._append_auto_log(message)
+        if self._busy_dialog is not None:
+            self._busy_dialog.setLabelText(message)
+            QtWidgets.QApplication.processEvents()
+
+    def _hide_busy_dialog(self) -> None:
+        if self._busy_dialog is not None:
+            self._busy_dialog.close()
+            self._busy_dialog.deleteLater()
+            self._busy_dialog = None
+            QtWidgets.QApplication.processEvents()
+
+    def _set_auto_detect_running(self, running: bool) -> None:
+        if hasattr(self, "auto_detect_button"):
+            self.auto_detect_button.setEnabled(not running)
+            self.auto_detect_button.setText("Running Cell Lumen..." if running else "Auto Detect Cells (Cell Lumen & PCA)")
+        if hasattr(self, "clean_auto_button"):
+            self.clean_auto_button.setEnabled(not running)
+
+    def _read_auto_detect_output(self) -> None:
+        if self.auto_process is None:
+            return
+        data = bytes(self.auto_process.readAllStandardOutput()).decode("utf-8", errors="replace")
+        for line in data.splitlines():
+            self._append_auto_log(line)
+
+    def _auto_process_finished(self, exit_code: int, status: QtCore.QProcess.ExitStatus) -> None:
+        process = self.auto_process
+        self._read_auto_detect_output()
+        self._set_auto_detect_running(False)
+        self.auto_process = None
+        if process is not None:
+            process.deleteLater()
+
+        csv_path = self._auto_detect_csv
+        if status != QtCore.QProcess.NormalExit or exit_code != 0:
+            self._append_auto_log(f"Cell Lumen failed with exit code {exit_code}.")
+            QtWidgets.QMessageBox.critical(
+                self,
+                "Auto detection failed",
+                "Cell Lumen did not finish successfully. Check the auto detection log for the exact C++ message.",
+            )
+            return
+        if csv_path is None or not csv_path.exists():
+            self._append_auto_log("Cell Lumen finished but did not create the expected CSV.")
+            QtWidgets.QMessageBox.critical(self, "Auto detection failed", "Cell Lumen finished but no output CSV was found.")
+            return
+
+        try:
+            self._show_busy_dialog("Preparing Editable Cells", "Cell Lumen finished. Importing detected ellipsoids...")
+            imported = self._import_auto_detect_csv(csv_path)
+            self._update_busy_dialog(f"Imported {imported} detected cells. Preparing napari editable layers...")
+            if imported > 0:
+                self.open_napari_adjuster()
+                self._update_busy_dialog("Drawing low opacity editable ellipsoid shells and selected cell handles...")
+                self._refresh_background_ring_layer()
+                self.set_interaction_mode("edit")
+            self._append_auto_log(f"Imported {imported} auto detected cells into the manual editor.")
+        except Exception as exc:
+            self._hide_busy_dialog()
+            self._append_auto_log(f"Could not import auto detection CSV: {exc}")
+            QtWidgets.QMessageBox.critical(self, "Auto CSV import failed", f"Cannot import the Cell Lumen output:\n{exc}")
+            return
+        finally:
+            self._hide_busy_dialog()
+
+        QtWidgets.QMessageBox.information(
+            self,
+            "Auto detection finished",
+            f"Imported {imported} Cell Lumen cells.\n\nThe result is an editable first pass. Please delete or adjust wrong cells before saving.",
+        )
+
+    def _import_auto_detect_csv(self, path: Path) -> int:
+        frame = self.frame_spin.value()
+        imported: list[ManualCell] = []
+        existing_names = {cell.name for cell in self.cells if not self._is_auto_detected_cell(cell)}
+        self._append_auto_log("Parsing Cell Lumen CSV and converting rows into editable ellipsoids.")
+        with path.open("r", newline="", encoding="utf-8-sig") as handle:
+            reader = csv.DictReader(handle)
+            if not reader.fieldnames:
+                raise ValueError("CSV has no header row.")
+            required = {"x", "y", "z"}
+            if not required.issubset(set(reader.fieldnames)):
+                raise ValueError("Cell Lumen CSV must contain x, y, and z columns.")
+            for row_index, row in enumerate(reader, start=1):
+                name = (row.get("name") or "").strip() or f"CL{row_index:03d}"
+                if name in existing_names:
+                    name = f"CL{row_index:03d}"
+                existing_names.add(name)
+                major = self._float_from_row(row, ("majorRadius", "aRadius", "radiusA", "radius"), 13.0)
+                middle = self._float_from_row(row, ("bRadius", "middleRadius", "radiusB"), major)
+                minor_from_cell_lumen = row.get("minorRadius") not in (None, "") and row.get("cRadius") in (None, "")
+                minor = self._float_from_row(row, ("minorRadius", "cRadius", "radiusC"), min(major, middle, 8.0))
+                if minor_from_cell_lumen:
+                    minor = minor / self.z_display_scale()
+                cell = ManualCell(
+                    name=name,
+                    frame=frame,
+                    category="mature",
+                    x=self._float_from_row(row, ("x",), 0.0),
+                    y=self._float_from_row(row, ("y",), 0.0),
+                    z=self._float_from_row(row, ("z",), 0.0),
+                    a=max(1.0, major),
+                    b=max(1.0, middle),
+                    c=max(1.0, minor),
+                    finalized=True,
+                    notes=f"{AUTO_DETECT_NOTE}; source={path.name}; z radius converted for napari display",
+                    order=len(imported) + 1,
+                )
+                self._clamp_cell_to_volume(cell)
+                imported.append(cell)
+                if row_index % 100 == 0:
+                    self._update_busy_dialog(f"Converted {row_index} detected cells into editable ellipsoids...")
+
+        self.cells = [cell for cell in self.cells if not self._is_auto_detected_cell(cell)]
+        start_index = len(self.cells)
+        for offset, cell in enumerate(imported):
+            cell.order = start_index + offset + 1
+        self.cells.extend(imported)
+        self._mark_background_rings_dirty()
+        self._reload_list(select=start_index if imported else min(self.selected_index, len(self.cells) - 1), refresh=False)
+        self._append_auto_log(f"Converted {len(imported)} Cell Lumen rows into editable cells.")
+        return len(imported)
+
+    def _float_from_row(self, row: dict[str, str], keys: tuple[str, ...], default: float) -> float:
+        for key in keys:
+            value = row.get(key)
+            if value is None or str(value).strip() == "":
+                continue
+            try:
+                return float(value)
+            except ValueError:
+                continue
+        return float(default)
+
+    def _is_auto_detected_cell(self, cell: ManualCell) -> bool:
+        return cell.notes.startswith(AUTO_DETECT_NOTE)
+
+    def clean_auto_detected_cells(self) -> None:
+        if self.auto_process is not None and self.auto_process.state() != QtCore.QProcess.NotRunning:
+            QtWidgets.QMessageBox.information(self, "Auto detection running", "Wait for Cell Lumen to finish before cleaning results.")
+            return
+        before = len(self.cells)
+        self.cells = [cell for cell in self.cells if not self._is_auto_detected_cell(cell)]
+        removed = before - len(self.cells)
+        self._mark_background_rings_dirty()
+        self._reload_list(select=min(self.selected_index, len(self.cells) - 1))
+        self._append_auto_log(f"Cleaned {removed} auto detected cells.")
+        if removed:
+            self.update_napari_edit_layers()
 
     def load_initial_csv(self, path: Path) -> None:
         loaded: list[ManualCell] = []
@@ -773,6 +1103,7 @@ class InitialStateBuilder(QtWidgets.QWidget):
         self.cells = loaded
         self._cell_counter = len([cell for cell in loaded if cell.category != "split"]) + 1
         self._pair_counter = max(1, len([cell for cell in loaded if cell.category == "split"]) // 2 + 1)
+        self._mark_background_rings_dirty()
         self._reload_list(select=0 if self.cells else -1)
 
     def add_cell_or_pair(self) -> None:
@@ -828,6 +1159,7 @@ class InitialStateBuilder(QtWidgets.QWidget):
                 order=len(self.cells) + 2,
             )
             self.cells.extend([left, right])
+            self._mark_background_rings_dirty()
             self._reload_list(select=len(self.cells) - 2)
         else:
             prefix = "M" if category == "mature" else "P"
@@ -845,6 +1177,7 @@ class InitialStateBuilder(QtWidgets.QWidget):
             )
             self._cell_counter += 1
             self.cells.append(cell)
+            self._mark_background_rings_dirty()
             self._reload_list(select=len(self.cells) - 1)
         self.set_interaction_mode("edit")
 
@@ -873,6 +1206,7 @@ class InitialStateBuilder(QtWidgets.QWidget):
         else:
             del self.cells[self.selected_index]
         self.selected_index = -1
+        self._mark_background_rings_dirty()
 
     def _candidate_center(self) -> tuple[float, float, float]:
         if self.volume is None:
@@ -896,19 +1230,20 @@ class InitialStateBuilder(QtWidgets.QWidget):
         if self.selected_cell is None:
             return
         del self.cells[self.selected_index]
+        self._mark_background_rings_dirty()
         self._reload_list(select=min(self.selected_index, len(self.cells) - 1))
 
     def select_relative(self, delta: int) -> None:
         if not self.cells:
             return
-        self._reload_list(select=max(0, min(len(self.cells) - 1, self.selected_index + delta)))
+        self._reload_list(select=max(0, min(len(self.cells) - 1, self.selected_index + delta)), refresh=False)
 
     def select_cell(self, index: int) -> None:
         self.selected_index = index
         self._cell_to_controls()
-        self.refresh_views()
+        self.update_napari_edit_layers()
 
-    def _reload_list(self, select: int = -1) -> None:
+    def _reload_list(self, select: int = -1, *, refresh: bool = True) -> None:
         self.cell_list.blockSignals(True)
         self.cell_list.clear()
         for cell in self.cells:
@@ -927,7 +1262,10 @@ class InitialStateBuilder(QtWidgets.QWidget):
         else:
             self.selected_index = -1
         self._cell_to_controls()
-        self.refresh_views()
+        if refresh:
+            self.refresh_views()
+        else:
+            self.update_napari_edit_layers()
 
     def _cell_to_controls(self) -> None:
         cell = self.selected_cell
@@ -941,6 +1279,57 @@ class InitialStateBuilder(QtWidgets.QWidget):
         self.b_spin.setValue(cell.b)
         self.c_spin.setValue(cell.c)
         self._updating_controls = False
+
+    def _clear_shape_controls(self) -> None:
+        self._updating_controls = True
+        self.x_spin.setValue(0.0)
+        self.y_spin.setValue(0.0)
+        self.z_spin.setValue(0.0)
+        self.a_spin.setValue(1.0)
+        self.b_spin.setValue(1.0)
+        self.c_spin.setValue(1.0)
+        self._updating_controls = False
+
+    def _reset_workspace_after_successful_save(self) -> None:
+        self.volume = None
+        self.volume_path = None
+        self._napari_volume_path = None
+        self._cached_base.clear()
+        self.cells.clear()
+        self.selected_index = -1
+        self._center_layer_cell_indices.clear()
+        self._last_control_data = None
+        self._drag_mode = None
+        self._auto_detect_csv = None
+        self._background_ring_refresh_timer.stop()
+        self._napari_sync_timer.stop()
+        self._background_rings_dirty = True
+
+        self.tif_path.clear()
+        self.frame_spin.setValue(0)
+        self.category_combo.blockSignals(True)
+        self.category_combo.setCurrentIndex(0)
+        self.category_combo.blockSignals(False)
+        self.cell_list.blockSignals(True)
+        self.cell_list.clear()
+        self.cell_list.blockSignals(False)
+        self._clear_shape_controls()
+        self.set_interaction_mode("view")
+        self.auto_log.clear()
+        self._append_auto_log("Saved CSV files. Workspace was cleared for the next TIFF frame.")
+
+        if self.napari_viewer is not None:
+            self._syncing_napari = True
+            try:
+                for layer in list(self.napari_viewer.layers):
+                    self.napari_viewer.layers.remove(layer)
+                self.napari_viewer.dims.ndisplay = 3
+            except Exception as exc:
+                self._log_napari_error("_reset_workspace_after_successful_save", exc)
+            finally:
+                self._syncing_napari = False
+
+        self.refresh_views()
 
     def _controls_to_cell(self) -> None:
         if self._updating_controls:
@@ -956,6 +1345,7 @@ class InitialStateBuilder(QtWidgets.QWidget):
         cell.c = self.c_spin.value()
         self._clamp_cell_to_volume(cell)
         self._update_selected_list_item()
+        self._mark_background_rings_dirty(schedule=True)
         self.update_napari_edit_layers()
 
     def pick_coordinate(self, plane: str, u: float, v: float, phase: str) -> None:
@@ -995,7 +1385,10 @@ class InitialStateBuilder(QtWidgets.QWidget):
                 cell.z = z_value
 
         self._clamp_cell_to_volume(cell)
-        self._reload_list(select=self.selected_index)
+        self._cell_to_controls()
+        self._update_selected_list_item()
+        self._mark_background_rings_dirty(schedule=True)
+        self.update_napari_edit_layers()
         if phase == "release":
             self._drag_mode = None
 
@@ -1137,6 +1530,7 @@ class InitialStateBuilder(QtWidgets.QWidget):
         self._clamp_cell_to_volume(cell)
         self._cell_to_controls()
         self._update_selected_list_item()
+        self._mark_background_rings_dirty(schedule=True)
         self.update_napari_edit_layers()
 
     def scale_selected(self, delta: float) -> None:
@@ -1148,6 +1542,7 @@ class InitialStateBuilder(QtWidgets.QWidget):
         cell.c = max(1.0, cell.c + delta * 0.5)
         self._cell_to_controls()
         self._update_selected_list_item()
+        self._mark_background_rings_dirty(schedule=True)
         self.update_napari_edit_layers()
 
     def _clamp_cell_to_volume(self, cell: ManualCell) -> None:
@@ -1271,15 +1666,47 @@ class InitialStateBuilder(QtWidgets.QWidget):
         except Exception as exc:
             self._log_napari_error("apply_colormap_to_volume", exc)
 
+    def set_ellipsoid_opacity_from_slider(self, value: int) -> None:
+        if hasattr(self, "ellipsoid_opacity"):
+            self.ellipsoid_opacity.blockSignals(True)
+            self.ellipsoid_opacity.setValue(float(value) / 100.0)
+            self.ellipsoid_opacity.blockSignals(False)
+        self.update_napari_edit_layers()
+
+    def set_ellipsoid_opacity_from_spin(self, value: float) -> None:
+        if hasattr(self, "ellipsoid_opacity_slider"):
+            self.ellipsoid_opacity_slider.blockSignals(True)
+            self.ellipsoid_opacity_slider.setValue(int(round(float(value) * 100)))
+            self.ellipsoid_opacity_slider.blockSignals(False)
+        self.update_napari_edit_layers()
+
+    def _ellipsoid_shells_visible(self) -> bool:
+        return not hasattr(self, "ellipsoid_visibility_button") or self.ellipsoid_visibility_button.isChecked()
+
+    def toggle_ellipsoid_shells(self) -> None:
+        visible = self._ellipsoid_shells_visible()
+        self.ellipsoid_visibility_button.setText("Hide Ellipsoid Shells" if visible else "Show Ellipsoid Shells")
+        self._background_rings_dirty = True
+        if self.napari_viewer is not None:
+            if visible:
+                self.update_napari_edit_layers()
+                self._refresh_background_ring_layer()
+            else:
+                self._remove_napari_layer("manual ellipsoid rings")
+                self._remove_napari_layer("selected ellipsoid rings")
+                self._remove_napari_layer("selected XYZ axes")
+
     def _sync_napari_cells(self) -> None:
         assert self.napari_viewer is not None
         self._syncing_napari = True
         scale = self._layer_scale()
         try:
-            finalized_cells = [cell for index, cell in enumerate(self.cells) if cell.finalized and index != self.selected_index]
+            finalized_items = [(index, cell) for index, cell in enumerate(self.cells) if cell.finalized]
+            finalized_cells = [cell for _, cell in finalized_items]
+            self._center_layer_cell_indices = [index for index, _ in finalized_items]
             centers = np.asarray([[cell.z, cell.y, cell.x] for cell in finalized_cells], dtype=float)
-            colors = [self._rgba_for_cell(cell, alpha=0.78) for cell in finalized_cells]
-            sizes = [4.0 for _ in finalized_cells]
+            colors = [(1.0, 0.04, 0.02, 0.92) for _ in finalized_cells]
+            sizes = [6.5 for _ in finalized_cells]
             centers_layer = self._replace_points_layer("finalized cell centers", centers, colors, sizes, scale)
             if centers_layer is not None:
                 self._set_layer_mode(centers_layer, "select")
@@ -1302,23 +1729,9 @@ class InitialStateBuilder(QtWidgets.QWidget):
                     pass
                 self._last_control_data = np.asarray(control_layer.data, dtype=float).copy()
 
-            rings: list[np.ndarray] = []
-            ring_colors: list[tuple[float, float, float, float]] = []
-            for cell in self.cells:
-                cell_rings = make_cell_rings(cell, segments=72, rings_per_axis=3, radius_scale=1.0)
-                rings.extend(cell_rings)
-                ring_colors.extend([self._rgba_for_cell(cell, alpha=1.0)] * len(cell_rings))
-            self._replace_shapes_layer(
-                "manual ellipsoid rings",
-                rings,
-                ring_colors,
-                scale,
-                edge_width=0.22,
-                opacity=self.ellipsoid_opacity.value() if hasattr(self, "ellipsoid_opacity") else 0.48,
-            )
-
-            axis_paths, axis_colors = self._selected_axis_paths()
-            self._replace_shapes_layer("selected XYZ axes", axis_paths, axis_colors, scale, edge_width=8.0, opacity=1.0)
+            self._sync_background_ring_layer(scale, force=self._background_rings_dirty)
+            self._sync_selected_ring_layer(scale)
+            self._remove_napari_layer("selected XYZ axes")
             self._apply_napari_interaction_mode()
         finally:
             self._syncing_napari = False
@@ -1441,7 +1854,7 @@ class InitialStateBuilder(QtWidgets.QWidget):
                 shape_type="path",
                 name=name,
                 edge_color=self._napari_color_argument(colors),
-                edge_width=max(edge_width, 3.0),
+                edge_width=max(edge_width, 0.1),
                 opacity=opacity,
                 scale=scale,
             )
@@ -1451,7 +1864,7 @@ class InitialStateBuilder(QtWidgets.QWidget):
                 shape_type="path",
                 name=name,
                 edge_color=self._napari_color_argument(colors),
-                edge_width=max(edge_width, 3.0),
+                edge_width=max(edge_width, 0.1),
                 opacity=opacity,
             )
             try:
@@ -1459,12 +1872,114 @@ class InitialStateBuilder(QtWidgets.QWidget):
             except Exception:
                 pass
 
+    def _sync_background_ring_layer(self, scale: tuple[float, float, float], *, force: bool) -> None:
+        if self.napari_viewer is None:
+            return
+        if not self._ellipsoid_shells_visible():
+            self._remove_napari_layer("manual ellipsoid rings")
+            self._background_rings_dirty = True
+            return
+        if not force and not self._background_rings_dirty and "manual ellipsoid rings" in self.napari_viewer.layers:
+            layer = self.napari_viewer.layers["manual ellipsoid rings"]
+            layer.scale = scale
+            layer.opacity = self.ellipsoid_opacity.value()
+            return
+
+        rings: list[np.ndarray] = []
+        ring_colors: list[tuple[float, float, float, float]] = []
+        if self.cells:
+            self._append_auto_log(
+                f"Drawing {len(self.cells)} editable ellipsoid shells with low detail background rings."
+            )
+        for index, cell in enumerate(self.cells, start=1):
+            cell_rings = make_cell_rings(
+                cell,
+                segments=BACKGROUND_RING_SEGMENTS,
+                rings_per_axis=BACKGROUND_RINGS_PER_AXIS,
+                radius_scale=1.0,
+            )
+            rings.extend(cell_rings)
+            ring_colors.extend([self._rgba_for_cell(cell, alpha=1.0)] * len(cell_rings))
+            if index % 80 == 0:
+                QtWidgets.QApplication.processEvents()
+        self._replace_shapes_layer(
+            "manual ellipsoid rings",
+            rings,
+            ring_colors,
+            scale,
+            edge_width=0.16,
+            opacity=self.ellipsoid_opacity.value(),
+        )
+        self._background_rings_dirty = False
+
+    def _sync_selected_ring_layer(self, scale: tuple[float, float, float]) -> None:
+        if self.napari_viewer is None:
+            return
+        layer_name = "selected ellipsoid rings"
+        cell = self.selected_cell
+        if cell is None or not self._ellipsoid_shells_visible():
+            self._remove_napari_layer(layer_name)
+            return
+        paths = make_cell_rings(
+            cell,
+            segments=SELECTED_RING_SEGMENTS,
+            rings_per_axis=SELECTED_RINGS_PER_AXIS,
+            radius_scale=1.0,
+        )
+        colors = [self._rgba_for_cell(cell, alpha=1.0)] * len(paths)
+        if layer_name in self.napari_viewer.layers:
+            layer = self.napari_viewer.layers[layer_name]
+            layer.data = paths
+            layer.scale = scale
+            layer.opacity = self.ellipsoid_opacity.value()
+            try:
+                layer.edge_color = self._napari_color_argument(colors)
+                layer.edge_width = 0.32
+            except Exception:
+                pass
+            return
+        self._replace_shapes_layer(
+            layer_name,
+            paths,
+            colors,
+            scale,
+            edge_width=0.32,
+            opacity=self.ellipsoid_opacity.value(),
+        )
+
+    def _mark_background_rings_dirty(self, *, schedule: bool = False) -> None:
+        self._background_rings_dirty = True
+        if schedule and self.napari_viewer is not None:
+            self._background_ring_refresh_timer.start(700)
+
+    def _refresh_background_ring_layer(self) -> None:
+        if self._syncing_napari or self.napari_viewer is None or self.volume is None:
+            return
+        self._syncing_napari = True
+        try:
+            self._sync_background_ring_layer(self._layer_scale(), force=True)
+        except Exception as exc:
+            self._log_napari_error("_refresh_background_ring_layer", traceback.format_exc() if not isinstance(exc, str) else exc)
+        finally:
+            self._syncing_napari = False
+
     def update_napari_edit_layers(self) -> None:
         if self._syncing_napari or self.napari_viewer is None or self.volume is None:
             return
         self._syncing_napari = True
         try:
             scale = self._layer_scale()
+            if "finalized cell centers" in self.napari_viewer.layers and self._center_layer_cell_indices:
+                center_cells = [
+                    self.cells[index]
+                    for index in self._center_layer_cell_indices
+                    if 0 <= index < len(self.cells) and self.cells[index].finalized
+                ]
+                self.napari_viewer.layers["finalized cell centers"].data = np.asarray(
+                    [[cell.z, cell.y, cell.x] for cell in center_cells],
+                    dtype=float,
+                )
+                self.napari_viewer.layers["finalized cell centers"].scale = scale
             control_points, _, _ = self._selected_control_points()
             if "selected 3D center and XYZ handles" in self.napari_viewer.layers and control_points:
                 control_layer = self.napari_viewer.layers["selected 3D center and XYZ handles"]
@@ -1476,21 +1991,13 @@ class InitialStateBuilder(QtWidgets.QWidget):
                 control_layer.scale = scale
                 self._last_control_data = np.asarray(control_layer.data, dtype=float).copy()
 
-            rings: list[np.ndarray] = []
-            for cell in self.cells:
-                rings.extend(make_cell_rings(cell, segments=72, rings_per_axis=3, radius_scale=1.0))
+            self._sync_selected_ring_layer(scale)
             if "manual ellipsoid rings" in self.napari_viewer.layers:
                 ring_layer = self.napari_viewer.layers["manual ellipsoid rings"]
-                ring_layer.data = rings
                 ring_layer.scale = scale
-                ring_layer.opacity = self.ellipsoid_opacity.value() if hasattr(self, "ellipsoid_opacity") else 0.48
+                ring_layer.opacity = self.ellipsoid_opacity.value()
 
-            axis_paths, _ = self._selected_axis_paths()
-            if "selected XYZ axes" in self.napari_viewer.layers:
-                axis_layer = self.napari_viewer.layers["selected XYZ axes"]
-                axis_layer.data = axis_paths
-                axis_layer.scale = scale
-                axis_layer.opacity = 1.0
+            self._remove_napari_layer("selected XYZ axes")
             self._apply_napari_interaction_mode()
         except Exception as exc:
             self._log_napari_error("update_napari_edit_layers", traceback.format_exc() if not isinstance(exc, str) else exc)
@@ -1596,6 +2103,7 @@ class InitialStateBuilder(QtWidgets.QWidget):
         self._last_control_data = data.copy()
         self._cell_to_controls()
         self._update_selected_list_item()
+        self._mark_background_rings_dirty(schedule=True)
         self.update_napari_edit_layers()
 
     def _napari_cell_selection_changed(self, event=None) -> None:
@@ -1607,9 +2115,12 @@ class InitialStateBuilder(QtWidgets.QWidget):
         selected_data = getattr(self.napari_viewer.layers[layer_name], "selected_data", set())
         if not selected_data:
             return
-        index = min(selected_data)
+        point_index = min(selected_data)
+        if point_index >= len(self._center_layer_cell_indices):
+            return
+        index = self._center_layer_cell_indices[point_index]
         if 0 <= index < len(self.cells) and index != self.selected_index:
-            self._reload_list(select=index)
+            self._reload_list(select=index, refresh=False)
 
     def _update_selected_list_item(self) -> None:
         cell = self.selected_cell
@@ -1657,8 +2168,46 @@ class InitialStateBuilder(QtWidgets.QWidget):
         if hit_index is not None:
             self.set_interaction_mode("edit")
             self._select_control_point(hit_index)
+            return
+        center_index = self._center_point_hit_index(event)
+        if center_index is not None:
+            self._select_cell_from_center_point(center_index)
+            return
         else:
             self.set_interaction_mode("view")
+
+    def _center_point_hit_index(self, event) -> int | None:
+        if self.napari_viewer is None:
+            return None
+        layer_name = "finalized cell centers"
+        if layer_name not in self.napari_viewer.layers:
+            return None
+        layer = self.napari_viewer.layers[layer_name]
+        if len(getattr(layer, "data", [])) == 0:
+            return None
+        try:
+            value = layer._get_value_(
+                position=event.position,
+                view_direction=event.view_direction,
+                dims_displayed=event.dims_displayed,
+                world=True,
+            )
+        except Exception as exc:
+            self._log_napari_error("_center_point_hit_index", exc)
+            return None
+        if value is None:
+            return None
+        return int(value)
+
+    def _select_cell_from_center_point(self, point_index: int) -> None:
+        if point_index >= len(self._center_layer_cell_indices):
+            return
+        cell_index = self._center_layer_cell_indices[point_index]
+        if not (0 <= cell_index < len(self.cells)):
+            return
+        self._reload_list(select=cell_index, refresh=False)
+        self.set_interaction_mode("edit")
+        self._select_control_point(0)
 
     def _control_point_hit_index(self, event) -> int | None:
         if self.napari_viewer is None:
@@ -1705,6 +2254,7 @@ class InitialStateBuilder(QtWidgets.QWidget):
         output_dir = Path(self.output_dir.text()).expanduser()
         output_dir.mkdir(parents=True, exist_ok=True)
         frame = self.frame_spin.value()
+        z_scale = self.z_display_scale()
         initial_output = output_dir / f"Initial_{frame:03d}.csv"
         shape_output = output_dir / f"Initial_{frame:03d}_manual_shapes.csv"
         pair_output = output_dir / f"Initial_{frame:03d}_daughter_pairs.csv"
@@ -1737,7 +2287,7 @@ class InitialStateBuilder(QtWidgets.QWidget):
                         "x": f"{cell.x:.6f}",
                         "aRadius": f"{cell.a:.6f}",
                         "bRadius": f"{cell.b:.6f}",
-                        "cRadius": f"{cell.c:.6f}",
+                        "cRadius": f"{cell.c * z_scale:.6f}",
                         "pairId": cell.pair_id,
                         "pairRole": cell.pair_role,
                         "manualCategory": CATEGORY_LABELS[cell.category],
@@ -1832,12 +2382,14 @@ class InitialStateBuilder(QtWidgets.QWidget):
                     }
                 )
         message = (
-            f"Saved CellUniverse initial CSV with center and ellipsoid radii:\n{initial_output}\n\n"
-            f"Saved manual editing metadata for review and reload:\n{shape_output}"
+            f"Saved CellUniverse initial CSV with center and C++ ready ellipsoid radii:\n{initial_output}\n\n"
+            f"Saved manual editing metadata with raw napari display radii for review and reload:\n{shape_output}"
         )
         if pair_rows:
             message += f"\n\nSaved daughter pair matching table:\n{pair_output}"
+        message += "\n\nThe current 3D workspace will be cleared after you close this message."
         QtWidgets.QMessageBox.information(self, "Saved", message)
+        self._reset_workspace_after_successful_save()
 
     def keyPressEvent(self, event: QtGui.QKeyEvent) -> None:
         cell = self.selected_cell

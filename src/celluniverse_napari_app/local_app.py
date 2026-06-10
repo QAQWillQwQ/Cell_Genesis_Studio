@@ -6,6 +6,7 @@ from pathlib import Path
 from PyQt5 import QtCore, QtWidgets
 
 from .initial_state_tool import InitialStateBuilder
+from .theme import apply_theme
 
 
 PROJECT_ROOT = Path("/Users/wangyiding/CellUniverse")
@@ -238,15 +239,52 @@ class CellUniverseLocalApp(QtWidgets.QMainWindow):
         super().__init__()
         self.setWindowTitle("Cell Genesis Studio")
         self.resize(1680, 1040)
+        self._build_appearance_bar()
         tabs = QtWidgets.QTabWidget()
+        tabs.setObjectName("MainTabs")
         tabs.addTab(InitialStateBuilder(), "Manual Initial Builder")
         tabs.addTab(VideoExportPanel(), "Showcase Video Export")
         self.setCentralWidget(tabs)
+
+    def _build_appearance_bar(self) -> None:
+        toolbar = QtWidgets.QToolBar("Appearance")
+        toolbar.setObjectName("AppearanceBar")
+        toolbar.setMovable(False)
+        toolbar.setFloatable(False)
+
+        title = QtWidgets.QLabel("Cell Genesis Studio")
+        title.setObjectName("AppTitle")
+
+        spacer = QtWidgets.QWidget()
+        spacer.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
+
+        appearance_label = QtWidgets.QLabel("Appearance")
+        appearance_label.setObjectName("MutedLabel")
+
+        self.theme_combo = QtWidgets.QComboBox()
+        self.theme_combo.setMinimumWidth(120)
+        self.theme_combo.addItem("Dark", "dark")
+        self.theme_combo.addItem("Light", "light")
+        self.theme_combo.currentIndexChanged.connect(self._theme_changed)
+
+        toolbar.addWidget(title)
+        toolbar.addWidget(spacer)
+        toolbar.addWidget(appearance_label)
+        toolbar.addWidget(self.theme_combo)
+        self.addToolBar(QtCore.Qt.TopToolBarArea, toolbar)
+
+    def _theme_changed(self) -> None:
+        app = QtWidgets.QApplication.instance()
+        if app is None:
+            return
+        theme_name = self.theme_combo.currentData() or "dark"
+        apply_theme(app, str(theme_name))
 
 
 def run_app() -> int:
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
     app.setApplicationName("Cell Genesis Studio")
+    apply_theme(app, "dark")
     window = CellUniverseLocalApp()
     window.show()
     return int(app.exec_())
