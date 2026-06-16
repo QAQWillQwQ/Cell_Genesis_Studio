@@ -237,6 +237,59 @@ def stylesheet(theme: Theme) -> str:
         font-weight: 600;
     }}
 
+    QPushButton#AutoDetectButton {{
+        background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                                   stop: 0 #7a3edb, stop: 1 #5828b6);
+        border-color: #9e66e5;
+        min-height: 34px;
+        color: #f8f3ff;
+    }}
+
+    QPushButton#AutoDetectButton:hover {{
+        background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                                   stop: 0 #894af0, stop: 1 #6641d4);
+        border-color: #b48cfa;
+    }}
+
+    QPushButton#AutoDetectButton:pressed {{
+        background: #4b1f9d;
+        border-color: #c4a5ff;
+    }}
+
+    QPushButton#CleanAutoButton {{
+        background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                                   stop: 0 #ffb347, stop: 1 #de8200);
+        border-color: #ffcb80;
+        color: #3b2600;
+        min-height: 34px;
+        font-weight: 700;
+    }}
+
+    QPushButton#CleanAutoButton:hover {{
+        background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                                   stop: 0 #ffc96d, stop: 1 #e48f17);
+    }}
+
+    QPushButton#CleanAutoButton:pressed {{
+        background: #c56d00;
+        border-color: #ffcc80;
+    }}
+
+    QToolButton#AutoDetectConfigMenu {{
+        background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                                   stop: 0 #2f2f32, stop: 1 #1d1d21);
+        border: 1px solid #5f5f66;
+        border-radius: 8px;
+        min-width: 32px;
+        min-height: 34px;
+        font-size: 18px;
+        color: {theme.text};
+    }}
+
+    QToolButton#AutoDetectConfigMenu::menu-indicator {{
+        image: none;
+    }}
+
     QPushButton:hover {{
         background: {theme.button_hover};
         border-color: {theme.accent};
@@ -404,6 +457,27 @@ def stylesheet(theme: Theme) -> str:
     QMessageBox {{
         background: {theme.panel};
         color: {theme.text};
+    }}
+
+    QDialog#AutoDetectBusyDialog {{
+        background: #1f1136;
+        border: 1px solid #6f3cb6;
+        border-radius: 12px;
+    }}
+
+    QLabel#AutoDetectDialogTitle {{
+        font-size: 16px;
+        font-weight: 700;
+        color: #f5ecff;
+    }}
+
+    QPlainTextEdit#AutoDetectBusyLog {{
+        background: #140a22;
+        border: 1px solid #6f3cb6;
+        border-radius: 10px;
+        color: #f6ebff;
+        font-size: 12px;
+        min-height: 220px;
     }}
 
     QToolTip {{

@@ -88,8 +88,16 @@ AUTO_DETECT_NOTE = "auto detected by Cell Lumen and PCA"
 CPP_CELLUNIVERSE_BINARY = Path("/Users/wangyiding/CellUniverse/C++/build/celluniverse")
 DEFAULT_CELL_LUMEN_CONFIG = Path(
     "/Users/wangyiding/CellUniverse/C++/config/C.elegans developing embryo/Concentrated/"
+    "C_elegans_DensityAuto_Best.yaml"
+)
+AUTO_LUMEN_CONFIG_FALLBACK = Path(
+    "/Users/wangyiding/CellUniverse/C++/config/C.elegans developing embryo/Concentrated/"
     "CONCENTRATED_SINGLE_FILE_DENSITY_SWITCH_CANDIDATE_NOT_RUN_VERIFIED_20260609.yaml"
 )
+AUTO_DETECT_CONFIG_PRESETS = [
+    DEFAULT_CELL_LUMEN_CONFIG,
+    AUTO_LUMEN_CONFIG_FALLBACK,
+]
 DEFAULT_ELLIPSOID_OPACITY = 1.0
 BACKGROUND_RING_SEGMENTS = 24
 BACKGROUND_RINGS_PER_AXIS = 1
@@ -366,7 +374,11 @@ class InitialStateBuilder(QtWidgets.QWidget):
         self._napari_auto_mouse_bound = False
         self._background_rings_dirty = True
         self._center_layer_cell_indices: list[int] = []
-        self._busy_dialog: QtWidgets.QProgressDialog | None = None
+        self._busy_dialog: QtWidgets.QDialog | None = None
+        self._busy_log_widget: QtWidgets.QPlainTextEdit | None = None
+        self._busy_status_label: QtWidgets.QLabel | None = None
+        self._auto_detect_log_lines: list[str] = []
+        self._auto_detect_preset_config: Path = DEFAULT_CELL_LUMEN_CONFIG
         self.auto_process: QtCore.QProcess | None = None
         self._auto_detect_csv: Path | None = None
         self._build_ui()
@@ -492,19 +504,30 @@ class InitialStateBuilder(QtWidgets.QWidget):
         auto_config_row.addWidget(self.auto_config_path, 1)
         auto_config_row.addWidget(choose_auto_config)
         self.auto_detect_button = QtWidgets.QPushButton("Auto Detect Cells (Cell Lumen & PCA)")
+        self.auto_detect_button.setObjectName("AutoDetectButton")
+        self.auto_detect_button.setMinimumHeight(34)
+        self.auto_detect_button.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
         self.auto_detect_button.clicked.connect(self.run_auto_detect_cells)
         self.clean_auto_button = QtWidgets.QPushButton("Clean Auto Detect")
+        self.clean_auto_button.setObjectName("CleanAutoButton")
+        self.clean_auto_button.setMinimumHeight(34)
+        self.clean_auto_button.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
         self.clean_auto_button.clicked.connect(self.clean_auto_detected_cells)
+        self.auto_detect_config_button = QtWidgets.QToolButton()
+        self.auto_detect_config_button.setObjectName("AutoDetectConfigMenu")
+        self.auto_detect_config_button.setText("▼")
+        self.auto_detect_config_button.setToolTip("Pick an auto-detect config")
+        self.auto_detect_config_button.setPopupMode(QtWidgets.QToolButton.InstantPopup)
+        self.auto_detect_config_button.setMinimumHeight(34)
+        self.auto_detect_config_button.setFixedWidth(32)
+        self.auto_detect_config_button.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
+        self._refresh_auto_detect_config_menu()
         auto_button_row = QtWidgets.QHBoxLayout()
-        auto_button_row.addWidget(self.auto_detect_button)
+        auto_button_row.addWidget(self.auto_detect_button, 1)
+        auto_button_row.addWidget(self.auto_detect_config_button)
         auto_button_row.addWidget(self.clean_auto_button)
-        self.auto_log = QtWidgets.QPlainTextEdit()
-        self.auto_log.setReadOnly(True)
-        self.auto_log.setMaximumHeight(120)
-        self.auto_log.setPlaceholderText("Cell Lumen progress will appear here while auto detection is running.")
         auto_layout.addLayout(auto_config_row)
         auto_layout.addLayout(auto_button_row)
-        auto_layout.addWidget(self.auto_log)
         controls.addWidget(auto_group)
 
         add_group = QtWidgets.QGroupBox("Step 3: Manual cell")
@@ -818,7 +841,52 @@ class InitialStateBuilder(QtWidgets.QWidget):
             "YAML files (*.yaml *.yml);;All files (*)",
         )
         if path:
-            self.auto_config_path.setText(path)
+            self._set_auto_detect_config_path(Path(path))
+
+    def _refresh_auto_detect_config_menu(self) -> None:
+        candidates = self._auto_detect_config_candidates()
+        menu = QtWidgets.QMenu(self.auto_detect_config_button)
+        if not candidates:
+            no_action = QtWidgets.QAction("No config files found", menu)
+            no_action.setEnabled(False)
+            menu.addAction(no_action)
+        else:
+            for config_path in candidates:
+                action = QtWidgets.QAction(config_path.name, menu)
+                action.setToolTip(str(config_path))
+                action.triggered.connect(lambda checked=False, p=config_path: self._set_auto_detect_config_path(p))
+                menu.addAction(action)
+        menu.addSeparator()
+        menu.addAction("Browse custom config...", self.choose_auto_config)
+        self.auto_detect_config_button.setMenu(menu)
+
+    def _auto_detect_config_candidates(self) -> list[Path]:
+        seen = set[str]()
+        ordered: list[Path] = []
+        for config_path in AUTO_DETECT_CONFIG_PRESETS:
+            resolved = config_path.expanduser().resolve()
+            if resolved.exists() and str(resolved) not in seen:
+                seen.add(str(resolved))
+                ordered.append(resolved)
+        for fallback in sorted(
+            list(DEFAULT_CELL_LUMEN_CONFIG.parent.glob("*.yml")) + list(DEFAULT_CELL_LUMEN_CONFIG.parent.glob("*.yaml")),
+            key=lambda p: p.name.lower(),
+        ):
+            resolved = fallback.resolve()
+            if str(resolved) not in seen:
+                seen.add(str(resolved))
+                ordered.append(resolved)
+        return ordered
+
+    def _set_auto_detect_config_path(self, path: Path) -> None:
+        self._auto_detect_preset_config = path
+        self.auto_config_path.setText(str(path))
+        self.auto_config_path.setToolTip(str(path))
+        self._refresh_auto_detect_config_menu()
+        if path.exists():
+            self.auto_config_path.setStyleSheet("")
+        else:
+            self.auto_config_path.setStyleSheet("border-color: #e56b6b;")
 
     def run_auto_detect_cells(self) -> None:
         if self.volume is None or self.volume_path is None:
@@ -849,7 +917,11 @@ class InitialStateBuilder(QtWidgets.QWidget):
         csv_output = output_dir / f"CellLumen_auto_detect_{stem}_{frame:03d}.csv"
         self._auto_detect_csv = csv_output
 
-        self.auto_log.clear()
+        self._clear_auto_log()
+        self._show_busy_dialog(
+            "Cell Lumen Detecting",
+            "Auto detection is running. Keep this app active and we will show live output here.",
+        )
         self._append_auto_log("Starting Cell Lumen auto detection.")
         self._append_auto_log(f"Input TIFF: {self.volume_path}")
         self._append_auto_log(f"Config: {config_path}")
@@ -870,6 +942,7 @@ class InitialStateBuilder(QtWidgets.QWidget):
         self._set_auto_detect_running(True)
         process.start()
         if not process.waitForStarted(3000):
+            self._hide_busy_dialog()
             self._set_auto_detect_running(False)
             self.auto_process = None
             QtWidgets.QMessageBox.critical(self, "Auto detection failed", "Cell Lumen process could not start.")
@@ -878,24 +951,49 @@ class InitialStateBuilder(QtWidgets.QWidget):
         return Path(self.output_dir.text()).expanduser() / "auto_detect"
 
     def _append_auto_log(self, text: str) -> None:
-        if not hasattr(self, "auto_log"):
-            return
         cleaned = text.rstrip()
         if not cleaned:
             return
-        self.auto_log.moveCursor(QtGui.QTextCursor.End)
-        self.auto_log.insertPlainText(cleaned + "\n")
-        self.auto_log.moveCursor(QtGui.QTextCursor.End)
+        self._auto_detect_log_lines.append(cleaned)
+        if len(self._auto_detect_log_lines) > 500:
+            del self._auto_detect_log_lines[:-500]
+        if hasattr(self, "auto_log"):
+            self.auto_log.moveCursor(QtGui.QTextCursor.End)
+            self.auto_log.insertPlainText(cleaned + "\n")
+            self.auto_log.moveCursor(QtGui.QTextCursor.End)
+        if self._busy_log_widget is not None:
+            self._busy_log_widget.moveCursor(QtGui.QTextCursor.End)
+            self._busy_log_widget.insertPlainText(cleaned + "\n")
+            self._busy_log_widget.moveCursor(QtGui.QTextCursor.End)
 
     def _show_busy_dialog(self, title: str, message: str) -> None:
         self._hide_busy_dialog()
-        dialog = QtWidgets.QProgressDialog(message, "", 0, 0, self)
+        dialog = QtWidgets.QDialog(self)
+        dialog.setObjectName("AutoDetectBusyDialog")
         dialog.setWindowTitle(title)
-        dialog.setCancelButton(None)
+        dialog.setMinimumWidth(620)
+        dialog.setAttribute(QtCore.Qt.WA_DeleteOnClose, False)
         dialog.setWindowModality(QtCore.Qt.ApplicationModal)
-        dialog.setMinimumDuration(0)
-        dialog.setAutoClose(False)
-        dialog.setAutoReset(False)
+        dialog.setWindowFlags(dialog.windowFlags() | QtCore.Qt.WindowStaysOnTopHint)
+        layout = QtWidgets.QVBoxLayout(dialog)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(8)
+        title_label = QtWidgets.QLabel("Cell Lumen Auto Detection")
+        title_label.setObjectName("AutoDetectDialogTitle")
+        title_label.setAlignment(QtCore.Qt.AlignCenter)
+        layout.addWidget(title_label)
+        self._busy_status_label = QtWidgets.QLabel(message)
+        self._busy_status_label.setWordWrap(True)
+        layout.addWidget(self._busy_status_label)
+        self._busy_log_widget = QtWidgets.QPlainTextEdit()
+        self._busy_log_widget.setObjectName("AutoDetectBusyLog")
+        self._busy_log_widget.setReadOnly(True)
+        self._busy_log_widget.setMinimumHeight(220)
+        self._busy_log_widget.setMaximumHeight(280)
+        layout.addWidget(self._busy_log_widget)
+        if self._auto_detect_log_lines:
+            self._busy_log_widget.setPlainText("\n".join(self._auto_detect_log_lines))
+            self._busy_log_widget.moveCursor(QtGui.QTextCursor.End)
         self._busy_dialog = dialog
         self._append_auto_log(message)
         dialog.show()
@@ -904,7 +1002,8 @@ class InitialStateBuilder(QtWidgets.QWidget):
     def _update_busy_dialog(self, message: str) -> None:
         self._append_auto_log(message)
         if self._busy_dialog is not None:
-            self._busy_dialog.setLabelText(message)
+            if self._busy_status_label is not None:
+                self._busy_status_label.setText(message)
             QtWidgets.QApplication.processEvents()
 
     def _hide_busy_dialog(self) -> None:
@@ -912,7 +1011,9 @@ class InitialStateBuilder(QtWidgets.QWidget):
             self._busy_dialog.close()
             self._busy_dialog.deleteLater()
             self._busy_dialog = None
-            QtWidgets.QApplication.processEvents()
+        self._busy_log_widget = None
+        self._busy_status_label = None
+        QtWidgets.QApplication.processEvents()
 
     def _set_auto_detect_running(self, running: bool) -> None:
         if hasattr(self, "auto_detect_button"):
@@ -920,6 +1021,8 @@ class InitialStateBuilder(QtWidgets.QWidget):
             self.auto_detect_button.setText("Running Cell Lumen..." if running else "Auto Detect Cells (Cell Lumen & PCA)")
         if hasattr(self, "clean_auto_button"):
             self.clean_auto_button.setEnabled(not running)
+        if hasattr(self, "auto_detect_config_button"):
+            self.auto_detect_config_button.setEnabled(not running)
 
     def _read_auto_detect_output(self) -> None:
         if self.auto_process is None:
@@ -933,6 +1036,7 @@ class InitialStateBuilder(QtWidgets.QWidget):
         self._read_auto_detect_output()
         self._set_auto_detect_running(False)
         self.auto_process = None
+        self._hide_busy_dialog()
         if process is not None:
             process.deleteLater()
 
@@ -1315,7 +1419,7 @@ class InitialStateBuilder(QtWidgets.QWidget):
         self.cell_list.blockSignals(False)
         self._clear_shape_controls()
         self.set_interaction_mode("view")
-        self.auto_log.clear()
+        self._clear_auto_log()
         self._append_auto_log("Saved CSV files. Workspace was cleared for the next TIFF frame.")
 
         if self.napari_viewer is not None:
@@ -1330,6 +1434,13 @@ class InitialStateBuilder(QtWidgets.QWidget):
                 self._syncing_napari = False
 
         self.refresh_views()
+
+    def _clear_auto_log(self) -> None:
+        self._auto_detect_log_lines.clear()
+        if hasattr(self, "auto_log"):
+            self.auto_log.clear()
+        if self._busy_log_widget is not None:
+            self._busy_log_widget.clear()
 
     def _controls_to_cell(self) -> None:
         if self._updating_controls:
